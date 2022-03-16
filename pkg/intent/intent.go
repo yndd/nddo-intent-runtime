@@ -39,13 +39,11 @@ type Compositeintent struct {
 	// data is nil
 }
 
-type InstanceInitFunc func(c resource.ClientApplicator, p Intent, name string) Intent
-
-func (x *Compositeintent) AddChild(name string, initFn InstanceInitFunc) {
+func (x *Compositeintent) AddChild(name string, i Intent) {
 	x.m.Lock()
 	defer x.m.Unlock()
 	if _, ok := x.intents[name]; !ok {
-		x.intents[name] = initFn(x.client, x, name)
+		x.intents[name] = i
 	}
 }
 
