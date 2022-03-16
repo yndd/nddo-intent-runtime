@@ -2,95 +2,73 @@ package intent
 
 import (
 	"context"
-	"fmt"
+	"sync"
 
 	"github.com/yndd/nddo-runtime/pkg/resource"
 )
 
-type Methods interface {
+type Intent interface {
 	Deploy(ctx context.Context, mg resource.Managed, labels map[string]string) error
 	Destroy(ctx context.Context, mg resource.Managed, labels map[string]string) error
 	List(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error)
 	Validate(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error)
 	Delete(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) error
+	GetData() interface{}
 }
 
-type Instances interface {
-	// methods children
-	NewInstance(c resource.ClientApplicator, name string, initFn InstanceInitFunc) Instance
-	GetInstances() map[string]Instance
-	Print(string) error
-}
-
-type Data interface {
-	Get() interface{}
-	Print() error
-}
-
-type Instance interface {
-	// instance data methods
-	Data
-	// intent methods
-	Methods
-}
-
-type Intent interface {
-	// method instances children
-	Instances
-	// intent methods
-	Methods
-}
-
-func New(c resource.ClientApplicator) Intent {
-	return &intent{
+func New(c resource.ClientApplicator, name string) Intent {
+	return &Compositeintent{
+		name: name,
 		// k8s client
 		client: c,
 		// parent is nil/root
 		// children
-		instance: make(map[string]Instance),
+		intents: make(map[string]Intent),
 		// data key
 	}
 }
 
-type intent struct {
+type Compositeintent struct {
+	name string
 	// k8s client
 	client resource.ClientApplicator
 	// parent is nil/root
 	// children
-	instance map[string]Instance
+	m       sync.Mutex
+	intents map[string]Intent
 	// data is nil
 }
 
-func NewInstance(c resource.ClientApplicator, p Intent, name string) Instance {
-	return nil
-}
+type InstanceInitFunc func(c resource.ClientApplicator, p Intent, name string) Intent
 
-type InstanceInitFunc func(c resource.ClientApplicator, p Intent, name string) Instance
-
-
-func (x *intent) NewInstance(c resource.ClientApplicator, name string, initFn InstanceInitFunc) Instance {
-	if _, ok := x.instance[name]; !ok {
-		x.instance[name] = initFn(c, x, name)
+func (x *Compositeintent) AddChild(name string, initFn InstanceInitFunc) {
+	x.m.Lock()
+	defer x.m.Unlock()
+	if _, ok := x.intents[name]; !ok {
+		x.intents[name] = initFn(x.client, x, name)
 	}
-	return x.instance[name]
 }
 
-func (x *intent) GetInstances() map[string]Instance {
-	return x.instance
+func (x *Compositeintent) GetChildData(name string) interface{} {
+	x.m.Lock()
+	defer x.m.Unlock()
+	return x.intents[name].GetData()
 }
 
-func (x *intent) Print(crName string) error {
-	fmt.Printf("intent information: %s\n", crName)
-	for _, d := range x.GetInstances() {
-		if err := d.Print(); err != nil {
-			return err
-		}
+func (x *Compositeintent) GetData() interface{} {
+	x.m.Lock()
+	defer x.m.Unlock()
+	d := make(map[string]interface{})
+	for name, i := range x.intents {
+		d[name] = i.GetData()
 	}
-	return nil
+	return d
 }
 
-func (x *intent) Deploy(ctx context.Context, mg resource.Managed, labels map[string]string) error {
-	for _, i := range x.GetInstances() {
+func (x *Compositeintent) Deploy(ctx context.Context, mg resource.Managed, labels map[string]string) error {
+	x.m.Lock()
+	defer x.m.Unlock()
+	for _, i := range x.intents {
 		if err := i.Deploy(ctx, mg, labels); err != nil {
 			return err
 		}
@@ -98,8 +76,10 @@ func (x *intent) Deploy(ctx context.Context, mg resource.Managed, labels map[str
 	return nil
 }
 
-func (x *intent) Destroy(ctx context.Context, mg resource.Managed, labels map[string]string) error {
-	for _, i := range x.GetInstances() {
+func (x *Compositeintent) Destroy(ctx context.Context, mg resource.Managed, labels map[string]string) error {
+	x.m.Lock()
+	defer x.m.Unlock()
+	for _, i := range x.intents {
 		if err := i.Destroy(ctx, mg, labels); err != nil {
 			return err
 		}
@@ -107,9 +87,11 @@ func (x *intent) Destroy(ctx context.Context, mg resource.Managed, labels map[st
 	return nil
 }
 
-func (x *intent) List(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error) {
+func (x *Compositeintent) List(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error) {
+	x.m.Lock()
+	defer x.m.Unlock()
 	var err error
-	for _, i := range x.GetInstances() {
+	for _, i := range x.intents {
 		resources, err = i.List(ctx, mg, resources)
 		if err != nil {
 			return nil, err
@@ -118,9 +100,11 @@ func (x *intent) List(ctx context.Context, mg resource.Managed, resources map[st
 	return resources, nil
 }
 
-func (x *intent) Validate(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error) {
+func (x *Compositeintent) Validate(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) (map[string]map[string]struct{}, error) {
+	x.m.Lock()
+	defer x.m.Unlock()
 	var err error
-	for _, i := range x.GetInstances() {
+	for _, i := range x.intents {
 		resources, err = i.Validate(ctx, mg, resources)
 		if err != nil {
 			return nil, err
@@ -129,8 +113,10 @@ func (x *intent) Validate(ctx context.Context, mg resource.Managed, resources ma
 	return resources, nil
 }
 
-func (x *intent) Delete(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) error {
-	for _, i := range x.GetInstances() {
+func (x *Compositeintent) Delete(ctx context.Context, mg resource.Managed, resources map[string]map[string]struct{}) error {
+	x.m.Lock()
+	defer x.m.Unlock()
+	for _, i := range x.intents {
 		if err := i.Delete(ctx, mg, resources); err != nil {
 			return err
 		}
