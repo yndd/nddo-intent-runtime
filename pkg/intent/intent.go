@@ -16,7 +16,7 @@ type Intent interface {
 	GetData() interface{}
 }
 
-func New(c resource.ClientApplicator, name string) Intent {
+func New(c resource.ClientApplicator, name string) *Compositeintent {
 	return &Compositeintent{
 		name: name,
 		// k8s client
